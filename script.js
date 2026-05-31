@@ -1,85 +1,58 @@
-const LOCAL_STORAGE_KEY = 'ff_tournaments';
-const USERS_DB_KEY = 'crx_users';
-const LOGGED_IN_USER_KEY = 'crx_logged_in_user';
-const TRANSACTIONS_KEY = 'crx_transactions';
 let currentJoinMatchId = null;
+let activeCategory = 'Solo';
+let globalMatches = [];
+let globalTransactions = [];
+let currentUserData = null;
 
-// --- DATA MANAGEMENT ---
-function getMatches() {
-  return JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
-}
+// --- FIREBASE CONFIGURATION ---
+const firebaseConfig = {
+  apiKey: "AIzaSyBlNH4tC-Mgd8nznfcCe4mu2NIgMnmHICU",
+  authDomain: "crx-esports-86e77.firebaseapp.com",
+  databaseURL: "https://crx-esports-86e77-default-rtdb.firebaseio.com",
+  projectId: "crx-esports-86e77",
+  storageBucket: "crx-esports-86e77.firebasestorage.app",
+  messagingSenderId: "427366605356",
+  appId: "1:427366605356:web:cbf876df3ea74e0bede789",
+  measurementId: "G-08XLZ7ZD7D"
+};
 
-function saveMatches(matches) {
-  localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(matches));
+// Initialize Firebase
+if (!firebase.apps.length) {
+  firebase.initializeApp(firebaseConfig);
 }
-
-function initMockData() {
-  if (getMatches().length === 0) {
-    saveMatches([{
-      id: Date.now().toString(),
-      name: "Bermuda Daily Squad",
-      type: "Squad",
-      version: "Mobile / PC",
-      perKill: "5 Reward",
-      fee: "Free",
-      prize: "500 Reward",
-      timing: new Date(Date.now() + 86400000).toISOString().slice(0, 16),
-      map: "Bermuda",
-      totalPlayers: 48,
-      joinedPlayers: 0,
-      players: [],
-      roomId: "",
-      password: ""
-    }]);
-  }
-}
-
-// --- WALLET LOGIC UTILS ---
-function getUserBalance(email) {
-  let users = JSON.parse(localStorage.getItem(USERS_DB_KEY) || '[]');
-  const user = users.find(u => u.email === email);
-  return user && user.walletBalance ? Number(user.walletBalance) : 0;
-}
-
-function updateUserBalance(email, amountChange) {
-  let users = JSON.parse(localStorage.getItem(USERS_DB_KEY) || '[]');
-  const userIndex = users.findIndex(u => u.email === email);
-  if (userIndex > -1) {
-    users[userIndex].walletBalance = (Number(users[userIndex].walletBalance) || 0) + Number(amountChange);
-    localStorage.setItem(USERS_DB_KEY, JSON.stringify(users));
-    const loggedInUser = JSON.parse(localStorage.getItem(LOGGED_IN_USER_KEY));
-    if (loggedInUser && loggedInUser.email === email) {
-      const hBal = document.getElementById('headerWalletBalance');
-      if (hBal) hBal.innerText = users[userIndex].walletBalance;
-    }
-  }
-}
+const auth = firebase.auth();
+const db = firebase.database();
 
 // --- USER AUTH LOGIC ---
 function initApp() {
   const authScreen = document.getElementById('authScreen');
   const mainApp = document.getElementById('mainApp');
-  const loggedInUser = localStorage.getItem(LOGGED_IN_USER_KEY);
   
-  if (authScreen && mainApp) {
-    if (loggedInUser) {
-      authScreen.classList.add('hidden');
-      mainApp.classList.remove('hidden');
-      const hBal = document.getElementById('headerWalletBalance');
-      if (hBal) {
-        hBal.innerText = getUserBalance(JSON.parse(loggedInUser).email);
+  auth.onAuthStateChanged(user => {
+    if (user) {
+      // Attach live listener to User's Database Document
+      db.ref('users/' + user.uid).on('value', snapshot => {
+        if (snapshot.exists()) {
+          currentUserData = { uid: user.uid, ...snapshot.val() };
+          const hBal = document.getElementById('headerWalletBalance');
+          if (hBal) hBal.innerText = currentUserData.walletBalance || 0;
+          if (document.getElementById('walletUserName')) initWalletPage();
+        }
+      });
+      if (authScreen && mainApp) {
+        authScreen.classList.add('hidden');
+        mainApp.classList.remove('hidden');
       }
     } else {
-      authScreen.classList.remove('hidden');
-      mainApp.classList.add('hidden');
+      currentUserData = null;
+      if (authScreen && mainApp) {
+        authScreen.classList.remove('hidden');
+        mainApp.classList.add('hidden');
+      } else if (document.getElementById('walletUserName')) {
+        window.location.href = 'index.html'; // Kick out of wallet page
+      }
     }
-  } else if (document.getElementById('walletUserName')) {
-    if (!loggedInUser) {
-      window.location.href = 'index.html';
-    } else {
-      initWalletPage();
-    }
-  }
+  });
 }
 
 function toggleAuthMode(mode) {
@@ -95,7 +68,7 @@ function toggleAuthMode(mode) {
 function handleSignup(e) {
   e.preventDefault();
   const name = document.getElementById('signupName').value.trim();
-  const email = document.getElementById('signupEmail').value.trim();
+  let email = document.getElementById('signupEmail').value.trim();
   const pass = document.getElementById('signupPassword').value;
   const confirm = document.getElementById('signupConfirm').value;
 
@@ -104,48 +77,37 @@ function handleSignup(e) {
     return;
   }
 
-  let users = JSON.parse(localStorage.getItem(USERS_DB_KEY) || '[]');
-  if (users.find(u => u.email === email)) {
-    alert("An account with this Email/Mobile already exists!");
-    return;
-  }
+  // Convert mobile number to a dummy email for Firebase Auth requirements
+  const displayEmail = email;
+  if (!email.includes('@')) email = email + '@crxesports.com';
 
-  users.push({ name, email, pass });
-  localStorage.setItem(USERS_DB_KEY, JSON.stringify(users));
-  localStorage.setItem(LOGGED_IN_USER_KEY, JSON.stringify({ name, email }));
-  
-  initApp();
+  auth.createUserWithEmailAndPassword(email, pass).then(cred => {
+    // Create user document in real-time database
+    return db.ref('users/' + cred.user.uid).set({
+      name: name,
+      email: email,
+      displayEmail: displayEmail,
+      walletBalance: 0
+    });
+  }).catch(err => alert(err.message));
 }
 
 function handleLogin(e) {
   e.preventDefault();
-  const email = document.getElementById('loginEmail').value.trim();
+  let email = document.getElementById('loginEmail').value.trim();
   const pass = document.getElementById('loginPassword').value;
 
-  let users = JSON.parse(localStorage.getItem(USERS_DB_KEY) || '[]');
-  const user = users.find(u => u.email === email && u.pass === pass);
+  if (!email.includes('@')) email = email + '@crxesports.com';
 
-  if (user) {
-    localStorage.setItem(LOGGED_IN_USER_KEY, JSON.stringify({ name: user.name, email: user.email }));
-    initApp();
-  } else {
-    alert("Invalid Email/Mobile or Password!");
-  }
+  auth.signInWithEmailAndPassword(email, pass).catch(err => alert(err.message));
 }
 
 function openProfileModal() {
-  const loggedInUser = JSON.parse(localStorage.getItem(LOGGED_IN_USER_KEY));
-  if (!loggedInUser) return;
-
-  let users = JSON.parse(localStorage.getItem(USERS_DB_KEY) || '[]');
-  const user = users.find(u => u.email === loggedInUser.email);
-
-  if (user) {
-    document.getElementById('profileName').value = user.name;
-    document.getElementById('profileEmail').value = user.email;
-    document.getElementById('profilePassword').value = '';
-    document.getElementById('profileModal').style.display = 'flex';
-  }
+  if (!currentUserData) return;
+  document.getElementById('profileName').value = currentUserData.name;
+  document.getElementById('profileEmail').value = currentUserData.displayEmail || currentUserData.email;
+  document.getElementById('profilePassword').value = '';
+  document.getElementById('profileModal').style.display = 'flex';
 }
 
 function closeProfileModal() {
@@ -153,11 +115,10 @@ function closeProfileModal() {
 }
 
 function saveProfile() {
-  const loggedInUser = JSON.parse(localStorage.getItem(LOGGED_IN_USER_KEY));
-  if (!loggedInUser) return;
+  if (!currentUserData) return;
 
   const newName = document.getElementById('profileName').value.trim();
-  const newEmail = document.getElementById('profileEmail').value.trim();
+  let newEmail = document.getElementById('profileEmail').value.trim();
   const newPass = document.getElementById('profilePassword').value;
 
   if (!newName || !newEmail) {
@@ -165,35 +126,28 @@ function saveProfile() {
     return;
   }
 
-  let users = JSON.parse(localStorage.getItem(USERS_DB_KEY) || '[]');
-  const userIndex = users.findIndex(u => u.email === loggedInUser.email);
+  const displayEmail = newEmail;
+  if (!newEmail.includes('@')) newEmail = newEmail + '@crxesports.com';
 
-  if (userIndex === -1) return;
+  const updates = [];
+  if (newEmail !== currentUserData.email) updates.push(auth.currentUser.updateEmail(newEmail));
+  if (newPass) updates.push(auth.currentUser.updatePassword(newPass));
 
-  if (newEmail !== loggedInUser.email && users.find(u => u.email === newEmail)) {
-    alert("An account with this Email/Mobile already exists!");
-    return;
-  }
-
-  users[userIndex].name = newName;
-  users[userIndex].email = newEmail;
-  if (newPass) users[userIndex].pass = newPass;
-
-  localStorage.setItem(USERS_DB_KEY, JSON.stringify(users));
-  localStorage.setItem(LOGGED_IN_USER_KEY, JSON.stringify({ name: newName, email: newEmail }));
-
-  alert("Profile updated successfully!");
-  closeProfileModal();
+  Promise.all(updates).then(() => {
+    return db.ref('users/' + currentUserData.uid).update({ name: newName, email: newEmail, displayEmail: displayEmail });
+  }).then(() => {
+    alert("Profile updated successfully!");
+    closeProfileModal();
+  }).catch(err => alert(err.message));
 }
 
 function userLogout() {
-  localStorage.removeItem(LOGGED_IN_USER_KEY);
-  closeProfileModal();
-  initApp();
+  auth.signOut().then(() => closeProfileModal());
 }
 
 // --- HOME PAGE LOGIC ---
 function openCategory(cat) {
+  activeCategory = cat;
   document.getElementById('homeScreen').classList.add('hidden');
   document.getElementById('matchesScreen').classList.remove('hidden');
   document.getElementById('catTitle').innerText = `${cat} Matches`;
@@ -208,7 +162,7 @@ function showHome() {
 function renderCategoryMatches(cat) {
   const container = document.getElementById('matchesGrid');
   if (!container) return;
-  const matches = getMatches().filter(m => m.type === cat);
+  const matches = globalMatches.filter(m => m.type === cat);
   
   if (matches.length === 0) {
     container.innerHTML = `<p style="text-align:center; color: #8a9bb8; margin-top:20px;">No upcoming matches in this category.</p>`;
@@ -245,9 +199,7 @@ function renderCategoryMatches(cat) {
         <div class="players-list-box">
           <h4>Joined Players (${joinedCount}/${m.totalPlayers})</h4>
           ${m.players && m.players.length > 0 ? 
-            `<ol class="player-ol">
-              ${m.players.map(p => `<li>${p}</li>`).join('')}
-            </ol>` : 
+            `<ol class="player-ol">${m.players.map(p => `<li>${p}</li>`).join('')}</ol>` : 
             `<p class="no-players">No players joined yet.</p>`
           }
         </div>
@@ -262,7 +214,7 @@ function renderCategoryMatches(cat) {
 }
 
 function openJoinModal(id) {
-  const match = getMatches().find(m => m.id === id);
+  const match = globalMatches.find(m => m.id === id);
   if (!match) return;
   const joinedCount = match.players && match.players.length > 0 ? match.players.length : Number(match.joinedPlayers) || 0;
   if (joinedCount >= Number(match.totalPlayers)) {
@@ -282,7 +234,7 @@ function closeModal() {
 }
 
 function openRoomDetailsModal(id) {
-  const match = getMatches().find(m => m.id === id);
+  const match = globalMatches.find(m => m.id === id);
   if (!match) return;
 
   const hasRoomDetails = (match.roomId && match.roomId.trim() !== '') || (match.password && match.password.trim() !== '');
@@ -309,49 +261,48 @@ function submitGameName() {
     return;
   }
   
-  const matches = getMatches();
-  const matchIndex = matches.findIndex(m => m.id === currentJoinMatchId);
-  if (matchIndex === -1) return;
-
-  const match = matches[matchIndex];
+  const matchRef = db.ref('matches/' + currentJoinMatchId);
   
-  // Initialize players array if it doesn't exist
-  if (!match.players) match.players = [];
+  matchRef.once('value').then(snapshot => {
+    if (!snapshot.exists()) return;
+    const m = snapshot.val();
+    let players = m.players || [];
+    const joinedCount = players.length > 0 ? players.length : (m.joinedPlayers || 0);
+    
+    if (joinedCount >= Number(m.totalPlayers)) {
+      alert("This match is full!");
+      return;
+    }
+    
+    if (players.includes(name)) {
+      alert("You already joined this match.");
+      return;
+    }
 
-  // Prevent same player from joining multiple times
-  if (match.players.includes(name)) {
-    alert("You already joined this match.");
-    return;
-  }
+    players.push(name);
 
-  // Add player & Update count
-  match.players.push(name);
-  match.joinedPlayers = match.players.length;
-  saveMatches(matches);
-  
-  // Update UI Instantly behind the modal
-  renderCategoryMatches(match.type);
-
-  document.getElementById('nameInputSection').classList.add('hidden');
-  document.getElementById('roomDetailsSection').classList.remove('hidden');
-  
-  document.getElementById('modalMatchName').innerText = match.name;
-  document.getElementById('modalMatchTiming').innerText = new Date(match.timing).toLocaleString();
-  
-  const credsBox = document.getElementById('modalCredentials');
-  if (match.roomId && match.password) {
-    credsBox.innerHTML = `<p><strong>Room ID:</strong> <span>${match.roomId}</span></p><p><strong>Password:</strong> <span>${match.password}</span></p>`;
-  } else {
-    credsBox.innerHTML = `<p class="alert-text">Room ID and Password will be available before match time.</p>`;
-  }
+    // Atomically add player to Database Array
+    matchRef.update({
+      players: players,
+      joinedPlayers: players.length
+    }).then(() => {
+      document.getElementById('nameInputSection').classList.add('hidden');
+      document.getElementById('roomDetailsSection').classList.remove('hidden');
+      document.getElementById('modalMatchName').innerText = m.name;
+      document.getElementById('modalMatchTiming').innerText = new Date(m.timing).toLocaleString();
+      
+      const credsBox = document.getElementById('modalCredentials');
+      if (m.roomId && m.password) credsBox.innerHTML = `<p><strong>Room ID:</strong> <span>${m.roomId}</span></p><p><strong>Password:</strong> <span>${m.password}</span></p>`;
+      else credsBox.innerHTML = `<p class="alert-text">Room ID and Password will be available before match time.</p>`;
+    });
+  }).catch(err => alert(err.message));
 }
 
 // --- ADMIN PAGE LOGIC ---
 function renderAdminMatches() {
   const container = document.getElementById('adminMatchesList');
   if (!container) return;
-  const matches = getMatches();
-  container.innerHTML = matches.map(m => `
+  container.innerHTML = globalMatches.map(m => `
     <div class="admin-match-item">
       <div class="admin-match-info">
         <h4>${m.name} <span style="font-size: 0.8rem; color:#888;">(${m.type})</span></h4>
@@ -367,7 +318,6 @@ function renderAdminMatches() {
 
 function handleAdminSubmit(e) {
   e.preventDefault();
-  const matches = getMatches();
   const editId = document.getElementById('editMatchId').value;
   
   const matchData = {
@@ -386,21 +336,19 @@ function handleAdminSubmit(e) {
   };
 
   if (editId) {
-    const index = matches.findIndex(m => m.id === editId);
-    if (index > -1) matches[index] = { ...matches[index], ...matchData };
-    alert("Match updated successfully!");
+    db.ref('matches/' + editId).update(matchData)
+      .then(() => { alert("Match updated live on all devices!"); cancelEdit(); })
+      .catch(err => alert(err.message));
   } else {
-    matches.push({ id: Date.now().toString(), players: [], ...matchData });
-    alert("New match added successfully!");
+    matchData.players = [];
+    db.ref('matches').push(matchData)
+      .then(() => { alert("New match created live!"); cancelEdit(); })
+      .catch(err => alert(err.message));
   }
-
-  saveMatches(matches);
-  cancelEdit();
-  renderAdminMatches();
 }
 
 function editMatch(id) {
-  const match = getMatches().find(m => m.id === id);
+  const match = globalMatches.find(m => m.id === id);
   if (!match) return;
 
   document.getElementById('formTitle').innerText = "✏️ Edit Match";
@@ -434,9 +382,9 @@ function cancelEdit() {
 
 function deleteMatch(id) {
   if (!confirm("Are you sure you want to delete this match?")) return;
-  const matches = getMatches().filter(m => m.id !== id);
-  saveMatches(matches);
-  renderAdminMatches();
+  db.ref('matches/' + id).remove()
+    .then(() => console.log("Match deleted live!"))
+    .catch(err => alert(err.message));
 }
 
 // --- ADMIN AUTH LOGIC ---
@@ -465,8 +413,7 @@ function showAdminDashboard() {
 function renderAdminWithdrawRequests() {
   const container = document.getElementById('adminWithdrawRequests');
   if (!container) return;
-  let txs = JSON.parse(localStorage.getItem(TRANSACTIONS_KEY) || '[]');
-  let pendingTxs = txs.filter(t => t.status === 'Pending').sort((a,b) => new Date(a.date) - new Date(b.date));
+  let pendingTxs = globalTransactions.filter(t => t.status === 'Pending').sort((a,b) => new Date(a.date) - new Date(b.date));
   
   if (pendingTxs.length === 0) {
     container.innerHTML = '<p style="color:var(--text-muted); font-style:italic;">No pending requests.</p>';
@@ -484,52 +431,90 @@ function renderAdminWithdrawRequests() {
 }
 
 function approveWithdraw(id) {
-  let txs = JSON.parse(localStorage.getItem(TRANSACTIONS_KEY) || '[]');
-  const index = txs.findIndex(t => t.id === id);
-  if (index > -1) {
-    txs[index].status = 'Approved';
-    localStorage.setItem(TRANSACTIONS_KEY, JSON.stringify(txs));
-    renderAdminWithdrawRequests();
-  }
+  db.ref('transactions/' + id).update({ status: 'Approved' });
 }
 
 function rejectWithdraw(id) {
-  let txs = JSON.parse(localStorage.getItem(TRANSACTIONS_KEY) || '[]');
-  const index = txs.findIndex(t => t.id === id);
-  if (index > -1) {
-    updateUserBalance(txs[index].email, txs[index].amount); // Refund
-    txs[index].status = 'Rejected';
-    localStorage.setItem(TRANSACTIONS_KEY, JSON.stringify(txs));
-    renderAdminWithdrawRequests();
-  }
+  db.ref('transactions/' + id).once('value').then(snap => {
+    if (!snap.exists()) return;
+    const tx = snap.val();
+    return db.ref('users').orderByChild('email').equalTo(tx.email).once('value').then(userSnap => {
+      if (userSnap.exists()) {
+        userSnap.forEach(childSnap => {
+          const currentBal = childSnap.val().walletBalance || 0;
+          childSnap.ref.update({ walletBalance: currentBal + tx.amount });
+        });
+      }
+      return db.ref('transactions/' + id).update({ status: 'Rejected' });
+    });
+  }).catch(err => alert(err.message));
 }
 
 function adminAddMoney() {
-  const email = document.getElementById('adminWalletEmail').value.trim();
+  let email = document.getElementById('adminWalletEmail').value.trim();
   const amount = document.getElementById('adminWalletAmount').value;
   if (!email || !amount || amount <= 0) { alert('Enter valid details.'); return; }
-  updateUserBalance(email, Number(amount));
-  let txs = JSON.parse(localStorage.getItem(TRANSACTIONS_KEY) || '[]');
-  txs.push({ id: Date.now().toString(), email: email, type: 'Added by Admin', amount: Number(amount), upi: '-', status: 'Approved', date: new Date().toISOString() });
-  localStorage.setItem(TRANSACTIONS_KEY, JSON.stringify(txs));
-  alert('Balance added successfully!');
+  if (!email.includes('@')) email = email + '@crxesports.com';
+
+  db.ref('users').orderByChild('email').equalTo(email).once('value').then(snap => {
+    if (!snap.exists()) { alert("User not found in Firebase Database."); return; }
+    let updates = [];
+    snap.forEach(childSnap => {
+      const currentBal = childSnap.val().walletBalance || 0;
+      updates.push(childSnap.ref.update({ walletBalance: currentBal + Number(amount) }));
+    });
+    return Promise.all(updates);
+  }).then(() => {
+    return db.ref('transactions').push({ email: email, type: 'Added by Admin', amount: Number(amount), upi: '-', status: 'Approved', date: new Date().toISOString() });
+  }).then(() => { alert('Balance added live!'); document.getElementById('adminWalletAmount').value = ''; }).catch(err => alert(err.message));
 }
 
 function adminDeductMoney() {
-  const email = document.getElementById('adminWalletEmail').value.trim();
+  let email = document.getElementById('adminWalletEmail').value.trim();
   const amount = document.getElementById('adminWalletAmount').value;
   if (!email || !amount || amount <= 0) { alert('Enter valid details.'); return; }
-  updateUserBalance(email, -Number(amount));
-  let txs = JSON.parse(localStorage.getItem(TRANSACTIONS_KEY) || '[]');
-  txs.push({ id: Date.now().toString(), email: email, type: 'Deducted by Admin', amount: Number(amount), upi: '-', status: 'Approved', date: new Date().toISOString() });
-  localStorage.setItem(TRANSACTIONS_KEY, JSON.stringify(txs));
-  alert('Balance deducted successfully!');
+  if (!email.includes('@')) email = email + '@crxesports.com';
+
+  db.ref('users').orderByChild('email').equalTo(email).once('value').then(snap => {
+    if (!snap.exists()) { alert("User not found in Firebase Database."); return; }
+    let updates = [];
+    snap.forEach(childSnap => {
+      const currentBal = childSnap.val().walletBalance || 0;
+      updates.push(childSnap.ref.update({ walletBalance: currentBal - Number(amount) }));
+    });
+    return Promise.all(updates);
+  }).then(() => {
+    return db.ref('transactions').push({ email: email, type: 'Deducted by Admin', amount: Number(amount), upi: '-', status: 'Approved', date: new Date().toISOString() });
+  }).then(() => { alert('Balance deducted live!'); document.getElementById('adminWalletAmount').value = ''; }).catch(err => alert(err.message));
 }
 
 // --- INIT ---
 window.onload = () => {
-  initMockData();
   initApp();
+  
+  // Setup Real-Time Listeners
+  db.ref('matches').on('value', snapshot => {
+    globalMatches = [];
+    if (snapshot.exists()) {
+      snapshot.forEach(child => {
+        globalMatches.push({ id: child.key, ...child.val() });
+      });
+    }
+    renderCategoryMatches(activeCategory);
+    renderAdminMatches();
+  });
+  
+  db.ref('transactions').on('value', snapshot => {
+    globalTransactions = [];
+    if (snapshot.exists()) {
+      snapshot.forEach(child => {
+        globalTransactions.push({ id: child.key, ...child.val() });
+      });
+    }
+    try { if (currentUserData) renderTransactionHistory(currentUserData.email); } catch(e) {}
+    renderAdminWithdrawRequests();
+    try { if (currentUserData && document.getElementById('walletUserName')) updateWalletPageData(currentUserData.email); } catch(e) {}
+  });
 
   const adminDashboard = document.getElementById('adminDashboardSection');
   if (adminDashboard) {
